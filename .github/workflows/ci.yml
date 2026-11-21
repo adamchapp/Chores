@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      # Starts Postgres in Docker via Testcontainers (Docker is preinstalled on ubuntu-latest).
+      - run: pnpm test:integration
+      - run: pnpm build
+
+  images:
+    name: Build container images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        app: [web, worker]
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -f apps/${{ matrix.app }}/Dockerfile -t chores-${{ matrix.app }} .
+
+  terraform:
+    name: Terraform fmt & validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+      - run: terraform fmt -recursive -check infra
+      - name: Validate
+        run: |
+          for dir in infra/bootstrap infra/envs/dev; do
+            terraform -chdir="$dir" init -backend=false -input=false
+            terraform -chdir="$dir" validate
+          done
