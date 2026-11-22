@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars and fill in. These values are not secret.
+project_id               = "chores-dev-xxxxxx"
+deployer_service_account = "github-deployer@chores-dev-xxxxxx.iam.gserviceaccount.com"

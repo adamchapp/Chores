@@ -1,0 +1,65 @@
+name: Deploy (dev)
+
+# Builds images, runs migrations, then rolls out web and worker to the dev
+# project. Skips until the "dev" GitHub environment is configured; see
+# infra/README.md for the one-off setup.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # for Workload Identity Federation
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: dev
+    if: vars.GCP_PROJECT_ID != ''
+    env:
+      REGION: europe-west2
+      REGISTRY: europe-west2-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/chores
+      VERSION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Build and push images
+        run: |
+          gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+          for app in web worker; do
+            docker build -f "apps/$app/Dockerfile" -t "$REGISTRY/$app:$VERSION" .
+            docker push "$REGISTRY/$app:$VERSION"
+          done
+
+      # Expand/contract migrations only, so the running revision keeps working.
+      - name: Run database migrations
+        run: |
+          gcloud run jobs update migrate --region "$REGION" --image "$REGISTRY/worker:$VERSION"
+          gcloud run jobs execute migrate --region "$REGION" --wait
+
+      - name: Deploy services
+        run: |
+          for app in web worker; do
+            gcloud run deploy "$app" --region "$REGION" \
+              --image "$REGISTRY/$app:$VERSION" \
+              --update-env-vars "APP_VERSION=$VERSION"
+          done
+
+      - name: Smoke test
+        run: |
+          url=$(gcloud run services describe web --region "$REGION" --format 'value(status.url)')
+          curl --fail --silent --show-error --retry 5 --retry-all-errors "$url/api/healthz" | tee /dev/stderr | grep -q "\"version\":\"$VERSION\""
